@@ -1,0 +1,7 @@
+node_modules/
+.next/
+target/
+*.class
+.env
+.env.local
+.DS_Store

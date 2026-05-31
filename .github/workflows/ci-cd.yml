@@ -1,0 +1,133 @@
+name: SAU Vibe CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ── 1. Frontend Build & Deploy (Vercel) ───────────────────────
+  frontend:
+    name: Frontend → Vercel
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+        env:
+          NEXT_PUBLIC_API_URL:               ${{ secrets.NEXT_PUBLIC_API_URL }}
+          NEXT_PUBLIC_WS_URL:                ${{ secrets.NEXT_PUBLIC_WS_URL }}
+          NEXT_PUBLIC_OPENWEATHER_KEY:       ${{ secrets.OPENWEATHER_API_KEY }}
+          NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME: ${{ secrets.CLOUDINARY_CLOUD_NAME }}
+          NEXT_PUBLIC_CLOUDINARY_PRESET:     ${{ secrets.CLOUDINARY_PRESET }}
+          ADMIN_KEY:                         ${{ secrets.ADMIN_KEY }}
+
+      - name: Deploy to Vercel
+        if: github.ref == 'refs/heads/main'
+        uses: amondnet/vercel-action@v25
+        with:
+          vercel-token:      ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id:     ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          working-directory: apps/frontend
+          vercel-args: --prod
+
+  # ── 2. Backend Build & Test ────────────────────────────────────
+  backend:
+    name: Backend → Build & Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/backend
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB:       sauvibe_test
+          POSTGRES_USER:     sauvibe
+          POSTGRES_PASSWORD: sauvibe123
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: 21
+          distribution: temurin
+          cache: maven
+
+      - name: Build & Test
+        run: mvn clean verify -q
+        env:
+          SPRING_DATASOURCE_URL:      jdbc:postgresql://localhost:5432/sauvibe_test
+          SPRING_DATASOURCE_USERNAME: sauvibe
+          SPRING_DATASOURCE_PASSWORD: sauvibe123
+          SPRING_DATA_REDIS_HOST:     localhost
+          OPENWEATHER_API_KEY:        ${{ secrets.OPENWEATHER_API_KEY }}
+          CHATBOT_API_URL:            http://localhost:8000
+
+      - name: Build Docker image
+        if: github.ref == 'refs/heads/main'
+        run: docker build -t sau-backend:${{ github.sha }} .
+
+  # ── 3. AI Model Build ──────────────────────────────────────────
+  ai:
+    name: AI Model → Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/CampusAssistantRag
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Lint
+        run: pip install ruff && ruff check . --select E,F --ignore E501 || true
+
+      - name: Build Docker image
+        if: github.ref == 'refs/heads/main'
+        run: docker build -t sau-ai:${{ github.sha }} .
