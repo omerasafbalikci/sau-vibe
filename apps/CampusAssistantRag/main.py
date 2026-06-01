@@ -64,7 +64,11 @@ def veritabanini_ilklendir():
 
 def veritabanini_hazirla():
     """PDF belgelerini vektör veritabanına yükler."""
-    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+embeddings = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2",
+    model_kwargs={"device": "cpu"},
+    encode_kwargs={"batch_size": 8}
+)
     if not os.path.exists("chroma_db") or not os.listdir("chroma_db"):
         print("Yerel Vektör Veritabanı oluşturuluyor...")
         loader = PyPDFDirectoryLoader("data")
