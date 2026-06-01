@@ -18,32 +18,38 @@ from langchain_classic.schema import HumanMessage, AIMessage, SystemMessage
 
 load_dotenv()
 
-# ── Google Embeddings — direct HTTP, no SDK version issues ──
+# ── HuggingFace Inference API Embeddings — free, no local model ──
 import requests as _requests
 from langchain_core.embeddings import Embeddings
 
-class GeminiHTTPEmbeddings(Embeddings):
-    """Direct HTTP calls to Google v1beta API — SDK-independent, no local model."""
-    BASE = "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004"
+class HFInferenceEmbeddings(Embeddings):
+    """HuggingFace Inference API — free tier, no local model, no RAM issue."""
+    API_URL = "https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2"
 
     def __init__(self):
-        self._key = os.getenv("GOOGLE_API_KEY", "")
-
-    def _embed(self, text: str, task: str) -> list:
-        url = f"{self.BASE}:embedContent?key={self._key}"
-        r = _requests.post(url, json={
-            "model": "models/text-embedding-004",
-            "content": {"parts": [{"text": text}]},
-            "taskType": task
-        }, timeout=30)
-        r.raise_for_status()
-        return r.json()["embedding"]["values"]
+        self._token = os.getenv("HF_TOKEN", "")
+        self._headers = {"Authorization": f"Bearer {self._token}"}
 
     def embed_documents(self, texts: list) -> list:
-        return [self._embed(t, "RETRIEVAL_DOCUMENT") for t in texts]
+        r = _requests.post(
+            self.API_URL,
+            headers=self._headers,
+            json={"inputs": texts, "options": {"wait_for_model": True}},
+            timeout=60
+        )
+        r.raise_for_status()
+        return r.json()
 
     def embed_query(self, text: str) -> list:
-        return self._embed(text, "RETRIEVAL_QUERY")
+        r = _requests.post(
+            self.API_URL,
+            headers=self._headers,
+            json={"inputs": [text], "options": {"wait_for_model": True}},
+            timeout=60
+        )
+        r.raise_for_status()
+        result = r.json()
+        return result[0] if isinstance(result[0], list) else result
 
 
 app = FastAPI(title="Sakarya Kampüs Asistanı API", version="2.0")
@@ -86,7 +92,7 @@ def veritabanini_ilklendir():
 
 def veritabanini_hazirla():
     # langchain-google-genai 4.x+ → google-genai kullanır, model adı prefix'siz
-    embeddings = GeminiHTTPEmbeddings()
+    embeddings = HFInferenceEmbeddings()
 
     chroma_dir = "/app/chroma_db"
     if not os.path.exists(chroma_dir) or not os.listdir(chroma_dir):
