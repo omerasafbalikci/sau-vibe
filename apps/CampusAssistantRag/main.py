@@ -58,7 +58,7 @@ def veritabanini_ilklendir():
 
 def veritabanini_hazirla():
     # langchain-google-genai 4.x+ → google-genai kullanır, model adı prefix'siz
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
 
     chroma_dir = "/app/chroma_db"
     if not os.path.exists(chroma_dir) or not os.listdir(chroma_dir):
