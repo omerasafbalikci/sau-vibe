@@ -60,7 +60,7 @@ def veritabanini_ilklendir():
 
 
 def veritabanini_hazirla():
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+    embeddings = GoogleGenerativeAIEmbeddings(model="text-embedding-004")
     if not os.path.exists("chroma_db") or not os.listdir("chroma_db"):
         print("Yerel Vektör Veritabanı oluşturuluyor...")
         loader = PyPDFDirectoryLoader("data")
