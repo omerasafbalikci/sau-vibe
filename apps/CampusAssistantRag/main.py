@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from langchain_community.document_loaders import PyPDFDirectoryLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import PromptTemplate
 from langchain_classic.chains import ConversationalRetrievalChain
 from langchain_classic.memory import ConversationBufferMemory
@@ -17,6 +17,22 @@ from langchain_classic.callbacks import AsyncIteratorCallbackHandler
 from langchain_classic.schema import HumanMessage, AIMessage, SystemMessage
 
 load_dotenv()
+
+# ── Chromadb'nin kendi ONNX embedding'i — torch yok, API yok, küçük RAM ──
+from langchain_core.embeddings import Embeddings
+from chromadb.utils.embedding_functions import DefaultEmbeddingFunction as ChromaEF
+
+class ChromaOnnxEmbeddings(Embeddings):
+    """ChromaDB built-in all-MiniLM-L6-v2 via ONNX — no torch, no API key needed."""
+    def __init__(self):
+        self._ef = ChromaEF()
+
+    def embed_documents(self, texts):
+        return [list(v) for v in self._ef(texts)]
+
+    def embed_query(self, text: str):
+        return list(self._ef([text])[0])
+
 
 app = FastAPI(title="Sakarya Kampüs Asistanı API", version="2.0")
 
@@ -58,7 +74,7 @@ def veritabanini_ilklendir():
 
 def veritabanini_hazirla():
     # langchain-google-genai 4.x+ → google-genai kullanır, model adı prefix'siz
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+    embeddings = ChromaOnnxEmbeddings()
 
     chroma_dir = "/app/chroma_db"
     if not os.path.exists(chroma_dir) or not os.listdir(chroma_dir):
