@@ -18,37 +18,32 @@ from langchain_classic.schema import HumanMessage, AIMessage, SystemMessage
 
 load_dotenv()
 
-# ── Google Gemini Embeddings — v1 API, no local model, no RAM issue ──
+# ── Google Embeddings — direct HTTP, no SDK version issues ──
+import requests as _requests
 from langchain_core.embeddings import Embeddings
-from google import genai as _google_genai
-from google.genai import types as _google_types
 
-class GeminiV1Embeddings(Embeddings):
-    """Google text-embedding-004 via v1 API — no local model needed."""
+class GeminiHTTPEmbeddings(Embeddings):
+    """Direct HTTP calls to Google v1beta API — SDK-independent, no local model."""
+    BASE = "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004"
+
     def __init__(self):
-        self._client = _google_genai.Client(
-            api_key=os.getenv("GOOGLE_API_KEY"),
-            http_options={"api_version": "v1"}
-        )
+        self._key = os.getenv("GOOGLE_API_KEY", "")
+
+    def _embed(self, text: str, task: str) -> list:
+        url = f"{self.BASE}:embedContent?key={self._key}"
+        r = _requests.post(url, json={
+            "model": "models/text-embedding-004",
+            "content": {"parts": [{"text": text}]},
+            "taskType": task
+        }, timeout=30)
+        r.raise_for_status()
+        return r.json()["embedding"]["values"]
 
     def embed_documents(self, texts: list) -> list:
-        results = []
-        for text in texts:
-            res = self._client.models.embed_content(
-                model="text-embedding-004",
-                contents=text,
-                config=_google_types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT")
-            )
-            results.append(list(res.embeddings[0].values))
-        return results
+        return [self._embed(t, "RETRIEVAL_DOCUMENT") for t in texts]
 
     def embed_query(self, text: str) -> list:
-        res = self._client.models.embed_content(
-            model="text-embedding-004",
-            contents=text,
-            config=_google_types.EmbedContentConfig(task_type="RETRIEVAL_QUERY")
-        )
-        return list(res.embeddings[0].values)
+        return self._embed(text, "RETRIEVAL_QUERY")
 
 
 app = FastAPI(title="Sakarya Kampüs Asistanı API", version="2.0")
@@ -91,7 +86,7 @@ def veritabanini_ilklendir():
 
 def veritabanini_hazirla():
     # langchain-google-genai 4.x+ → google-genai kullanır, model adı prefix'siz
-    embeddings = GeminiV1Embeddings()
+    embeddings = GeminiHTTPEmbeddings()
 
     chroma_dir = "/app/chroma_db"
     if not os.path.exists(chroma_dir) or not os.listdir(chroma_dir):
