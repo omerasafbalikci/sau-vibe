@@ -13,7 +13,6 @@ from langchain_chroma import Chroma
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_classic.chains.retrieval_qa.base import RetrievalQA
 from langchain_core.prompts import PromptTemplate
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_classic.chains import ConversationalRetrievalChain
 from langchain_classic.memory import ConversationBufferMemory
 from langchain_classic.callbacks import AsyncIteratorCallbackHandler
@@ -61,11 +60,7 @@ def veritabanini_ilklendir():
 
 
 def veritabanini_hazirla():
-    embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2",
-        model_kwargs={"device": "cpu"},
-        encode_kwargs={"batch_size": 8}
-    )
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
     if not os.path.exists("chroma_db") or not os.listdir("chroma_db"):
         print("Yerel Vektör Veritabanı oluşturuluyor...")
         loader = PyPDFDirectoryLoader("data")
