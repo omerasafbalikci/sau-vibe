@@ -18,6 +18,7 @@ from langchain_classic.chains import ConversationalRetrievalChain
 from langchain_classic.memory import ConversationBufferMemory
 from langchain_classic.callbacks import AsyncIteratorCallbackHandler
 from langchain_classic.schema import HumanMessage, AIMessage, SystemMessage
+
 load_dotenv()
 
 # --- 1. FASTAPI VE CORS AYARLARI ---
@@ -37,10 +38,8 @@ vector_store = None
 
 # --- 2. SQLITE VERİTABANI YÖNETİMİ ---
 def veritabanini_ilklendir():
-    """Sohbet geçmişini kalıcı tutacak SQLite tablolarını oluşturur."""
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
-        # Sohbet oturumları tablosu
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 session_id TEXT PRIMARY KEY,
@@ -48,7 +47,6 @@ def veritabanini_ilklendir():
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        # Mesajlar tablosu
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -63,12 +61,11 @@ def veritabanini_ilklendir():
 
 
 def veritabanini_hazirla():
-    """PDF belgelerini vektör veritabanına yükler."""
-embeddings = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-MiniLM-L6-v2",
-    model_kwargs={"device": "cpu"},
-    encode_kwargs={"batch_size": 8}
-)
+    embeddings = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        model_kwargs={"device": "cpu"},
+        encode_kwargs={"batch_size": 8}
+    )
     if not os.path.exists("chroma_db") or not os.listdir("chroma_db"):
         print("Yerel Vektör Veritabanı oluşturuluyor...")
         loader = PyPDFDirectoryLoader("data")
@@ -96,16 +93,12 @@ class SoruIstegi(BaseModel):
     soru: str
 
 
-# --- 4. API UÇ NOKTALARI (ENDPOINT'LER) ---
+# --- 4. API UÇ NOKTALARI ---
 
 @app.post("/chat")
 async def chat_endpoint(istek: SoruIstegi):
-    """Belirli bir session_id üzerinden streaming yanıt üretir ve hafızaya kaydeder."""
-
-    # Her istek geldiğinde o oturuma özel dinamik bir LangChain hafızası oluşturuyoruz
     hafiza = ConversationBufferMemory(memory_key="chat_history", return_messages=True, output_key="answer")
 
-    # SQLite'tan bu oturuma ait geçmiş mesajları çekip LangChain hafızasına yüklüyoruz
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT role, content FROM messages WHERE session_id = ? ORDER BY id ASC", (istek.session_id,))
@@ -117,10 +110,7 @@ async def chat_endpoint(istek: SoruIstegi):
                 hafiza.chat_memory.add_ai_message(content)
 
     callback = AsyncIteratorCallbackHandler()
-    sessiz_llm = ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",
-        temperature=0.1
-    )
+    sessiz_llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.1)
     asistan_llm = ChatGoogleGenerativeAI(
         model="gemini-2.5-flash",
         temperature=0.1,
@@ -143,8 +133,8 @@ async def chat_endpoint(istek: SoruIstegi):
     ozel_prompt = PromptTemplate(template=prompt_sablari, input_variables=["context", "question"])
 
     qa_chain = ConversationalRetrievalChain.from_llm(
-        llm=asistan_llm,  # Asıl cevabı verecek model
-        condense_question_llm=sessiz_llm,  # <-- BÜYÜK GÜNCELLEME: Arka plan işlerini yapacak sessiz model
+        llm=asistan_llm,
+        condense_question_llm=sessiz_llm,
         retriever=vector_store.as_retriever(search_kwargs={"k": 10}),
         memory=hafiza,
         combine_docs_chain_kwargs={"prompt": ozel_prompt}
@@ -152,29 +142,20 @@ async def chat_endpoint(istek: SoruIstegi):
 
     async def stream_generator():
         task = asyncio.create_task(qa_chain.ainvoke({"question": istek.soru}))
-
         tam_cevap = ""
         async for token in callback.aiter():
             yield token
             tam_cevap += token
-
         await task
 
-        # Akış başarıyla bittikten sonra hem soruyu hem cevabı SQLite veritabanına kilitliyoruz
         with sqlite3.connect(DB_FILE) as conn:
             cursor = conn.cursor()
-
-            # Eğer bu oturum ilk defa açılıyorsa, ilk sorunun ilk 30 harfini sohbet başlığı yapıyoruz
             cursor.execute("SELECT session_id FROM sessions WHERE session_id = ?", (istek.session_id,))
             if not cursor.fetchone():
                 baslik = istek.soru if len(istek.soru) <= 30 else istek.soru[:30] + "..."
                 cursor.execute("INSERT INTO sessions (session_id, title) VALUES (?, ?)", (istek.session_id, baslik))
-
-            # Mesajları kaydet
-            cursor.execute("INSERT INTO messages (session_id, role, content) VALUES (?, 'user', ?)",
-                           (istek.session_id, istek.soru))
-            cursor.execute("INSERT INTO messages (session_id, role, content) VALUES (?, 'ai', ?)",
-                           (istek.session_id, tam_cevap))
+            cursor.execute("INSERT INTO messages (session_id, role, content) VALUES (?, 'user', ?)", (istek.session_id, istek.soru))
+            cursor.execute("INSERT INTO messages (session_id, role, content) VALUES (?, 'ai', ?)", (istek.session_id, tam_cevap))
             conn.commit()
 
     return StreamingResponse(stream_generator(), media_type="text/plain")
@@ -182,7 +163,6 @@ async def chat_endpoint(istek: SoruIstegi):
 
 @app.get("/sessions")
 async def get_sessions():
-    """Sol menüde listelemek için tüm geçmiş sohbet başlıklarını ve ID'lerini döner."""
     with sqlite3.connect(DB_FILE) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
@@ -193,22 +173,18 @@ async def get_sessions():
 
 @app.get("/sessions/{session_id}")
 async def get_session_history(session_id: str):
-    """Eski bir sohbete tıklandığında, o sohbete ait geçmiş mesajları arayüze yükler."""
     with sqlite3.connect(DB_FILE) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute("SELECT role, content, timestamp FROM messages WHERE session_id = ? ORDER BY id ASC",
-                       (session_id,))
+        cursor.execute("SELECT role, content, timestamp FROM messages WHERE session_id = ? ORDER BY id ASC", (session_id,))
         rows = cursor.fetchall()
         if not rows:
-            # Eğer oturum başlığı var ama mesaj yoksa boş liste dönebilir
             return []
         return [dict(row) for row in rows]
 
 
 @app.delete("/sessions/{session_id}")
 async def delete_session(session_id: str):
-    """Bir sohbet geçmişini veritabanından tamamen siler."""
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
@@ -218,15 +194,10 @@ async def delete_session(session_id: str):
 
 @app.post("/general-chat")
 async def general_chat_endpoint(istek: SoruIstegi):
-    """PDF'lere bakmayan, gündelik ve genel amaçlı yapay zeka (Düz Chat) endpoint'i."""
-
-    # 1. Sistemin Karakteri ve Hafızayı Yükleme
     mesajlar = [
-        SystemMessage(
-            content="Sen kullanıcılara her türlü genel konuda yardımcı olan, samimi, kibar ve zeki bir yapay zeka asistanısın.")
+        SystemMessage(content="Sen kullanıcılara her türlü genel konuda yardımcı olan, samimi, kibar ve zeki bir yapay zeka asistanısın.")
     ]
 
-    # SQLite'tan eski mesajları çekip formata uygun şekilde listeye ekliyoruz
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT role, content FROM messages WHERE session_id = ? ORDER BY id ASC", (istek.session_id,))
@@ -237,41 +208,25 @@ async def general_chat_endpoint(istek: SoruIstegi):
             elif role == "ai":
                 mesajlar.append(AIMessage(content=content))
 
-    # Öğrencinin anlık sorduğu yeni soruyu da listeye ekliyoruz
     mesajlar.append(HumanMessage(content=istek.soru))
 
-    # 2. Konuşan Beyni Tanımlama
-    # DİKKAT: RAG botunda ciddi olsun diye temperature=0.1 yapmıştık.
-    # Genel botta yaratıcı ve sohbetkar olsun diye temperature=0.7 yapıyoruz.
-    genel_llm = ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",
-        temperature=0.7
-    )
+    genel_llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.7)
 
-    # 3. Akış (Streaming) Jeneratörü
     async def stream_generator():
         tam_cevap = ""
-        # RAG olmadığı için karmaşık zincirlere (chain) gerek yok, doğrudan astream ile kelimeleri çekiyoruz
         async for chunk in genel_llm.astream(mesajlar):
             if chunk.content:
                 yield chunk.content
                 tam_cevap += chunk.content
 
-        # Akış bitince tıpkı diğer bot gibi bunu da veritabanına kilitliyoruz
         with sqlite3.connect(DB_FILE) as conn:
             cursor = conn.cursor()
-
-            # İlk soruysa başlık oluştur
             cursor.execute("SELECT session_id FROM sessions WHERE session_id = ?", (istek.session_id,))
             if not cursor.fetchone():
                 baslik = istek.soru if len(istek.soru) <= 30 else istek.soru[:30] + "..."
                 cursor.execute("INSERT INTO sessions (session_id, title) VALUES (?, ?)", (istek.session_id, baslik))
-
-            # Mesajları kaydet
-            cursor.execute("INSERT INTO messages (session_id, role, content) VALUES (?, 'user', ?)",
-                           (istek.session_id, istek.soru))
-            cursor.execute("INSERT INTO messages (session_id, role, content) VALUES (?, 'ai', ?)",
-                           (istek.session_id, tam_cevap))
+            cursor.execute("INSERT INTO messages (session_id, role, content) VALUES (?, 'user', ?)", (istek.session_id, istek.soru))
+            cursor.execute("INSERT INTO messages (session_id, role, content) VALUES (?, 'ai', ?)", (istek.session_id, tam_cevap))
             conn.commit()
 
     return StreamingResponse(stream_generator(), media_type="text/plain")
