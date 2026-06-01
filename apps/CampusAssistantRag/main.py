@@ -7,8 +7,8 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from langchain_community.document_loaders import PyPDFDirectoryLoader
+from langchain_community.retrievers import BM25Retriever
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_chroma import Chroma
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import PromptTemplate
 from langchain_classic.chains import ConversationalRetrievalChain
@@ -18,42 +18,7 @@ from langchain_classic.schema import HumanMessage, AIMessage, SystemMessage
 
 load_dotenv()
 
-# ── HuggingFace Inference API Embeddings — free, no local model ──
-import requests as _requests
-from langchain_core.embeddings import Embeddings
-
-class HFInferenceEmbeddings(Embeddings):
-    """HuggingFace Inference API — free tier, no local model, no RAM issue."""
-    API_URL = "https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2"
-
-    def __init__(self):
-        self._token = os.getenv("HF_TOKEN", "")
-        self._headers = {"Authorization": f"Bearer {self._token}"}
-
-    def embed_documents(self, texts: list) -> list:
-        r = _requests.post(
-            self.API_URL,
-            headers=self._headers,
-            json={"inputs": texts, "options": {"wait_for_model": True}},
-            timeout=60
-        )
-        r.raise_for_status()
-        return r.json()
-
-    def embed_query(self, text: str) -> list:
-        r = _requests.post(
-            self.API_URL,
-            headers=self._headers,
-            json={"inputs": [text], "options": {"wait_for_model": True}},
-            timeout=60
-        )
-        r.raise_for_status()
-        result = r.json()
-        return result[0] if isinstance(result[0], list) else result
-
-
 app = FastAPI(title="Sakarya Kampüs Asistanı API", version="2.0")
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -63,7 +28,7 @@ app.add_middleware(
 )
 
 DB_FILE = "/app/data_store/campus_history.db"
-vector_store = None
+retriever_instance = None
 
 
 def veritabanini_ilklendir():
@@ -90,39 +55,23 @@ def veritabanini_ilklendir():
         conn.commit()
 
 
-def veritabanini_hazirla():
-    # langchain-google-genai 4.x+ → google-genai kullanır, model adı prefix'siz
-    embeddings = HFInferenceEmbeddings()
-
-    chroma_dir = "/app/chroma_db"
-    if not os.path.exists(chroma_dir) or not os.listdir(chroma_dir):
-        print("Vektör Veritabanı oluşturuluyor...")
+def get_retriever():
+    global retriever_instance
+    if retriever_instance is None:
+        print("PDF'ler yükleniyor, BM25 indeksi oluşturuluyor...")
         loader = PyPDFDirectoryLoader("data")
         docs = loader.load()
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=150)
-        chunks = text_splitter.split_documents(docs)
-        v_store = Chroma.from_documents(
-            documents=chunks,
-            embedding=embeddings,
-            persist_directory=chroma_dir
-        )
-        print("Vektör Veritabanı oluşturuldu!")
-        return v_store
-    else:
-        return Chroma(persist_directory=chroma_dir, embedding_function=embeddings)
-
-
-def get_vector_store():
-    global vector_store
-    if vector_store is None:
-        vector_store = veritabanini_hazirla()
-    return vector_store
+        splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=150)
+        chunks = splitter.split_documents(docs)
+        retriever_instance = BM25Retriever.from_documents(chunks, k=10)
+        print("BM25 indeksi hazır!")
+    return retriever_instance
 
 
 @app.on_event("startup")
 async def startup_event():
     veritabanini_ilklendir()
-    print("🚀 Sunucu hazır! Vektör DB ilk istekte yüklenecek.")
+    print("🚀 Sunucu hazır! BM25 indeksi ilk istekte yüklenecek.")
 
 
 class SoruIstegi(BaseModel):
@@ -146,26 +95,15 @@ def kaydet(session_id: str, soru: str, cevap: str):
         cursor.execute("SELECT session_id FROM sessions WHERE session_id = ?", (session_id,))
         if not cursor.fetchone():
             baslik = soru[:30] + "..." if len(soru) > 30 else soru
-            cursor.execute(
-                "INSERT INTO sessions (session_id, title) VALUES (?, ?)",
-                (session_id, baslik)
-            )
-        cursor.execute(
-            "INSERT INTO messages (session_id, role, content) VALUES (?, 'user', ?)",
-            (session_id, soru)
-        )
-        cursor.execute(
-            "INSERT INTO messages (session_id, role, content) VALUES (?, 'ai', ?)",
-            (session_id, cevap)
-        )
+            cursor.execute("INSERT INTO sessions (session_id, title) VALUES (?, ?)", (session_id, baslik))
+        cursor.execute("INSERT INTO messages (session_id, role, content) VALUES (?, 'user', ?)", (session_id, soru))
+        cursor.execute("INSERT INTO messages (session_id, role, content) VALUES (?, 'ai', ?)", (session_id, cevap))
         conn.commit()
 
 
 @app.post("/chat")
 async def chat_endpoint(istek: SoruIstegi):
-    hafiza = ConversationBufferMemory(
-        memory_key="chat_history", return_messages=True, output_key="answer"
-    )
+    hafiza = ConversationBufferMemory(memory_key="chat_history", return_messages=True, output_key="answer")
     for role, content in get_gecmis(istek.session_id):
         if role == "user":
             hafiza.chat_memory.add_user_message(content)
@@ -175,10 +113,7 @@ async def chat_endpoint(istek: SoruIstegi):
     callback = AsyncIteratorCallbackHandler()
     sessiz_llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.1)
     asistan_llm = ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",
-        temperature=0.1,
-        streaming=True,
-        callbacks=[callback]
+        model="gemini-2.5-flash", temperature=0.1, streaming=True, callbacks=[callback]
     )
 
     prompt_sablonu = """Sen Sakarya Üniversitesi Bilgisayar ve Bilişim Bilimleri Fakültesi öğrencileri için hazırlanmış Kampüs Asistanısın.
@@ -193,17 +128,14 @@ Metinler:
 Soru: {question}
 Cevap:"""
 
-    ozel_prompt = PromptTemplate(
-        template=prompt_sablonu,
-        input_variables=["context", "question"]
-    )
-
     qa_chain = ConversationalRetrievalChain.from_llm(
         llm=asistan_llm,
         condense_question_llm=sessiz_llm,
-        retriever=get_vector_store().as_retriever(search_kwargs={"k": 10}),
+        retriever=get_retriever(),
         memory=hafiza,
-        combine_docs_chain_kwargs={"prompt": ozel_prompt}
+        combine_docs_chain_kwargs={"prompt": PromptTemplate(
+            template=prompt_sablonu, input_variables=["context", "question"]
+        )}
     )
 
     async def stream_generator():
@@ -220,9 +152,7 @@ Cevap:"""
 
 @app.post("/general-chat")
 async def general_chat_endpoint(istek: SoruIstegi):
-    mesajlar = [SystemMessage(
-        content="Sen kullanıcılara her türlü genel konuda yardımcı olan, samimi, kibar ve zeki bir yapay zeka asistanısın."
-    )]
+    mesajlar = [SystemMessage(content="Sen kullanıcılara her türlü genel konuda yardımcı olan, samimi, kibar ve zeki bir yapay zeka asistanısın.")]
     for role, content in get_gecmis(istek.session_id):
         if role == "user":
             mesajlar.append(HumanMessage(content=content))
@@ -248,9 +178,7 @@ async def get_sessions():
     with sqlite3.connect(DB_FILE) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT session_id, title, created_at FROM sessions ORDER BY created_at DESC"
-        )
+        cursor.execute("SELECT session_id, title, created_at FROM sessions ORDER BY created_at DESC")
         return [dict(row) for row in cursor.fetchall()]
 
 
@@ -259,10 +187,7 @@ async def get_session_history(session_id: str):
     with sqlite3.connect(DB_FILE) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT role, content, timestamp FROM messages WHERE session_id = ? ORDER BY id ASC",
-            (session_id,)
-        )
+        cursor.execute("SELECT role, content, timestamp FROM messages WHERE session_id = ? ORDER BY id ASC", (session_id,))
         return [dict(row) for row in cursor.fetchall()]
 
 
