@@ -18,20 +18,37 @@ from langchain_classic.schema import HumanMessage, AIMessage, SystemMessage
 
 load_dotenv()
 
-# ── Chromadb'nin kendi ONNX embedding'i — torch yok, API yok, küçük RAM ──
+# ── Google Gemini Embeddings — v1 API, no local model, no RAM issue ──
 from langchain_core.embeddings import Embeddings
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction as ChromaEF
+from google import genai as _google_genai
+from google.genai import types as _google_types
 
-class ChromaOnnxEmbeddings(Embeddings):
-    """ChromaDB built-in all-MiniLM-L6-v2 via ONNX — no torch, no API key needed."""
+class GeminiV1Embeddings(Embeddings):
+    """Google text-embedding-004 via v1 API — no local model needed."""
     def __init__(self):
-        self._ef = ChromaEF()
+        self._client = _google_genai.Client(
+            api_key=os.getenv("GOOGLE_API_KEY"),
+            http_options={"api_version": "v1"}
+        )
 
-    def embed_documents(self, texts):
-        return [list(v) for v in self._ef(texts)]
+    def embed_documents(self, texts: list) -> list:
+        results = []
+        for text in texts:
+            res = self._client.models.embed_content(
+                model="text-embedding-004",
+                contents=text,
+                config=_google_types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT")
+            )
+            results.append(list(res.embeddings[0].values))
+        return results
 
-    def embed_query(self, text: str):
-        return list(self._ef([text])[0])
+    def embed_query(self, text: str) -> list:
+        res = self._client.models.embed_content(
+            model="text-embedding-004",
+            contents=text,
+            config=_google_types.EmbedContentConfig(task_type="RETRIEVAL_QUERY")
+        )
+        return list(res.embeddings[0].values)
 
 
 app = FastAPI(title="Sakarya Kampüs Asistanı API", version="2.0")
@@ -74,7 +91,7 @@ def veritabanini_ilklendir():
 
 def veritabanini_hazirla():
     # langchain-google-genai 4.x+ → google-genai kullanır, model adı prefix'siz
-    embeddings = ChromaOnnxEmbeddings()
+    embeddings = GeminiV1Embeddings()
 
     chroma_dir = "/app/chroma_db"
     if not os.path.exists(chroma_dir) or not os.listdir(chroma_dir):
