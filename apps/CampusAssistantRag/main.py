@@ -19,6 +19,7 @@ from langchain_core.embeddings import Embeddings
 from langchain_classic.chains import ConversationalRetrievalChain
 from langchain_classic.memory import ConversationBufferMemory
 from langchain_classic.callbacks import AsyncIteratorCallbackHandler
+from langchain_classic.schema import HumanMessage, AIMessage, SystemMessage
 
 load_dotenv()
 
@@ -215,6 +216,45 @@ async def get_session_history(session_id: str):
         cursor.execute("SELECT role, content, timestamp FROM messages WHERE session_id = ? ORDER BY id ASC", (session_id,))
         rows = cursor.fetchall()
         return [dict(row) for row in rows] if rows else []
+
+
+@app.post("/general-chat")
+async def general_chat_endpoint(istek: SoruIstegi):
+    """PDF'lere bakmayan, genel amaçlı Gemini sohbet endpoint'i."""
+    mesajlar = [SystemMessage(
+        content="Sen kullanıcılara her türlü genel konuda yardımcı olan, samimi, kibar ve zeki bir yapay zeka asistanısın."
+    )]
+
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT role, content FROM messages WHERE session_id = ? ORDER BY id ASC", (istek.session_id,))
+        for role, content in cursor.fetchall():
+            if role == "user":
+                mesajlar.append(HumanMessage(content=content))
+            elif role == "ai":
+                mesajlar.append(AIMessage(content=content))
+
+    mesajlar.append(HumanMessage(content=istek.soru))
+    genel_llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.7)
+
+    async def stream_generator():
+        tam_cevap = ""
+        async for chunk in genel_llm.astream(mesajlar):
+            if chunk.content:
+                yield chunk.content
+                tam_cevap += chunk.content
+
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT session_id FROM sessions WHERE session_id = ?", (istek.session_id,))
+            if not cursor.fetchone():
+                baslik = istek.soru if len(istek.soru) <= 30 else istek.soru[:30] + "..."
+                cursor.execute("INSERT INTO sessions (session_id, title) VALUES (?, ?)", (istek.session_id, baslik))
+            cursor.execute("INSERT INTO messages (session_id, role, content) VALUES (?, 'user', ?)", (istek.session_id, istek.soru))
+            cursor.execute("INSERT INTO messages (session_id, role, content) VALUES (?, 'ai', ?)", (istek.session_id, tam_cevap))
+            conn.commit()
+
+    return StreamingResponse(stream_generator(), media_type="text/plain")
 
 
 @app.delete("/sessions/{session_id}")
