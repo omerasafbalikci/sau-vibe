@@ -81,10 +81,16 @@ def veritabanini_hazirla():
 
 @app.on_event("startup")
 async def startup_event():
-    global vector_store
+    # Sadece SQLite'ı başlat — vektör DB ilk istekte lazy yüklenir
     veritabanini_ilklendir()
-    vector_store = veritabanini_hazirla()
-    print("🚀 Akıllı Hafızalı Sunucu Başarıyla Ayağa Kalktı!")
+    print("🚀 Sunucu Ayağa Kalktı! Vektör DB ilk istekte yüklenecek.")
+
+
+def get_vector_store():
+    global vector_store
+    if vector_store is None:
+        vector_store = veritabanini_hazirla()
+    return vector_store
 
 
 # --- 3. PYDANTIC MODELLERİ ---
@@ -135,7 +141,7 @@ async def chat_endpoint(istek: SoruIstegi):
     qa_chain = ConversationalRetrievalChain.from_llm(
         llm=asistan_llm,
         condense_question_llm=sessiz_llm,
-        retriever=vector_store.as_retriever(search_kwargs={"k": 10}),
+        retriever=get_vector_store().as_retriever(search_kwargs={"k": 10}),
         memory=hafiza,
         combine_docs_chain_kwargs={"prompt": ozel_prompt}
     )
